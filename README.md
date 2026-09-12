@@ -101,6 +101,36 @@ than a whole tree, which is a different input and a different action.
 **Treat a passing coverage gate as evidence the harness ran, not as evidence
 the code is correct.**
 
+## Measure the baseline ON CI, not locally
+
+The floors describe what CI will see, so CI has to be what measures them.
+
+A locally-measured floor is a guess about another machine. On
+`dvystrcil/helm-update-ai` the two disagreed by **1.5 points** — a local run
+of the identical tree and the same 105 tests reported 55.11% / 43.25% where
+CI reported 53.56% / 40.80%, so floors set from the local figure failed the
+gate the moment it landed.
+
+Ruled out there: environment variables (re-run locally with `GITHUB_ACTIONS`,
+`CI` and `GITHUB_REPOSITORY` set — unchanged) and tree differences (16 files,
+1162 statements, nothing untracked). The likely cause is **unpinned
+dependencies**: that repo's `requirements.txt` specifies only minimums, so a
+fresh CI resolve takes different fallback paths than a long-lived local venv.
+`dvystrcil/llm-wiki`, measured the same way in the same session, matched CI
+exactly — and has no `requirements.txt` at all.
+
+So: land the workflow with provisional floors, read the real numbers off the
+first run's `COVERAGE-GATE-COMPLETE` line, and commit those.
+
+```
+measured: --tests-run 105 --lines 53.56 --branches 40.80
+```
+
+Set each floor **~0.85 below** the CI figure. That is enough headroom for
+ordinary churn, and close enough to stay under the 1-point ratchet slack so
+the gate does not suggest raising the floor on every single PR — which is how
+a notice gets ignored.
+
 ## Exit codes
 
 | code | meaning |
