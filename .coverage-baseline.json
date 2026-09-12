@@ -1,0 +1,7 @@
+{
+  "_comment": "Floors for this action own suite. Raise them when the gate says ratchet_ready; never lower without saying why in the PR.",
+  "floors": {
+    "lines": 91.3,
+    "branches": 82.2
+  }
+}

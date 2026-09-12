@@ -1,0 +1,61 @@
+name: validate
+
+# This action gates itself with itself (`uses: ./`). If the gate ever stops
+# working, the PR that broke it cannot merge — which is the only arrangement
+# that makes a gate trustworthy over time.
+
+on: [pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  self-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install coverage.py
+        run: python3 -m pip install --quiet coverage
+
+      # The action's own suite, measured and gated by the action.
+      - uses: ./
+        with:
+          runtime: python
+
+  # A gate that cannot fail is not a gate. These assert the two verdicts that
+  # matter, by running the gate directly against known inputs -- the action
+  # step above only ever exercises the passing path on a healthy PR.
+  gate-has-teeth:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: A suite that ran nothing is exit 2, not a coverage score
+        run: |
+          set -uo pipefail
+          echo '{"floors":{"lines":50.0}}' > /tmp/bl.json
+          set +e
+          python3 coverage_gate.py --baseline /tmp/bl.json --tests-run 0 --lines 0
+          rc=$?
+          set -e
+          [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 for zero tests, got $rc"; exit 1; }
+
+      - name: Coverage below the floor is exit 1
+        run: |
+          set -uo pipefail
+          echo '{"floors":{"lines":90.0}}' > /tmp/bl.json
+          set +e
+          python3 coverage_gate.py --baseline /tmp/bl.json --tests-run 10 --lines 12.5
+          rc=$?
+          set -e
+          [ "$rc" -eq 1 ] || { echo "::error::expected exit 1 below floor, got $rc"; exit 1; }
+
+      - name: A missing baseline is exit 2, never a free pass
+        run: |
+          set -uo pipefail
+          set +e
+          python3 coverage_gate.py --baseline /tmp/does-not-exist.json --tests-run 10 --lines 99
+          rc=$?
+          set -e
+          [ "$rc" -eq 2 ] || { echo "::error::expected exit 2 for missing baseline, got $rc"; exit 1; }

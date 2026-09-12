@@ -1,0 +1,93 @@
+name: coverage-gate
+description: >
+  Run a repo's test suite under coverage and gate the PR on three things a
+  single percentage cannot separate: that the tests actually EXECUTED, that
+  coverage has not fallen below a committed floor, and which metric moved.
+  Floors live in a baseline file rather than in workflow YAML, so raising one
+  is a reviewable diff and lowering one cannot happen by accident.
+
+  Deliberately does NOT attempt mutation testing — see the README. Coverage
+  says every line ran; it cannot say anything would have noticed if the line
+  were wrong.
+
+inputs:
+  runtime:
+    description: '"node" or "python".'
+    required: true
+  test_command:
+    description: >
+      Command that runs the suite. Must emit coverage in the runtime's native
+      format. Defaults below are the dependency-free invocations.
+    default: ""
+  baseline:
+    description: Committed JSON file holding the coverage floors.
+    default: ".coverage-baseline.json"
+  working_directory:
+    description: Directory to run in.
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Run the suite under coverage
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        set -uo pipefail   # deliberately NOT -e: a failing suite must still
+                           # reach the gate, so the summary says whether the
+                           # tests failed or were never collected.
+        CMD='${{ inputs.test_command }}'
+        if [ -z "$CMD" ]; then
+          case '${{ inputs.runtime }}' in
+            node)   CMD='node --experimental-test-coverage --test tests/*.js' ;;
+            python) CMD='python3 -m coverage run -m unittest discover -s tests -p "test*.py"' ;;
+          esac
+        fi
+        echo "::group::$CMD"
+        set +e
+        eval "$CMD" 2>&1 | tee /tmp/test-output.txt
+        rc=${PIPESTATUS[0]}
+        set -e
+        echo "::endgroup::"
+        echo "suite_rc=$rc" >> "$GITHUB_OUTPUT"
+
+    - name: Export coverage.py report
+      if: inputs.runtime == 'python'
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        set -uo pipefail
+        # `|| true`: a missing report is handled by the parser, which reports
+        # the metric as ABSENT rather than as zero. Failing here instead would
+        # lose the test-count signal, which is the more important half.
+        python3 -m coverage json -o /tmp/coverage.json --quiet || true
+
+    - name: Gate
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        set -euo pipefail
+        ACTION_DIR='${{ github.action_path }}'
+        EXTRA=""
+        if [ '${{ inputs.runtime }}' = 'python' ] && [ -f /tmp/coverage.json ]; then
+          EXTRA="--coverage-json /tmp/coverage.json"
+        fi
+        ARGS=$(python3 "$ACTION_DIR/extract_metrics.py" \
+                 --runtime '${{ inputs.runtime }}' \
+                 --test-output /tmp/test-output.txt $EXTRA)
+        echo "measured: $ARGS"
+
+        set +e
+        python3 "$ACTION_DIR/coverage_gate.py" --baseline '${{ inputs.baseline }}' $ARGS
+        gate_rc=$?
+        set -e
+
+        # A suite that FAILED and a suite that never ran are different
+        # findings, and neither is "coverage regressed". Report both rather
+        # than letting the gate's exit code stand in for all three.
+        if [ '${{ steps.run.outputs.suite_rc }}' != '0' ] && [ "$gate_rc" -eq 0 ]; then
+          echo "::error::the test suite exited ${{ steps.run.outputs.suite_rc }} — coverage is at or above its floor, but the tests did not pass"
+          exit 1
+        fi
+        exit $gate_rc

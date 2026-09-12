@@ -1,0 +1,118 @@
+# coverage-action
+
+Composite action: run a repo's test suite under coverage and gate the PR on
+three things a single percentage cannot separate.
+
+```yaml
+- uses: dvystrcil/coverage-action@v1
+  with:
+    runtime: node          # or: python
+```
+
+## What it checks, and why it is three things
+
+**1. That the tests actually executed.**
+
+A pytest-style module executed as `python3 file.py` imports cleanly, defines
+its test functions, runs none of them, and exits 0. The check goes green
+having asserted nothing. Coverage of such a run is not "low" in a way anyone
+notices — it is a number nobody reads.
+
+So `tests=0` fails with exit **2** and a message that does not mention
+coverage, because "the harness ran nothing" and "the code is poorly covered"
+are different findings with different fixes
+([homelab#1184](https://github.com/dvystrcil/homelab/issues/1184) AC1: a
+check that can be a no-op must report which it was).
+
+**2. That coverage has not dropped below a committed floor.**
+
+Floors live in `.coverage-baseline.json`, not in workflow YAML, so raising one
+is a reviewable diff and lowering one cannot happen by accident:
+
+```json
+{ "floors": { "lines": 99.0, "branches": 85.0, "functions": 95.0 } }
+```
+
+The gate fails below the floor (exit **1**) and *reports without failing* when
+a metric has risen a full point above it, so the baseline gets raised and the
+gain cannot be lost silently. Same shape as homelab's `policy/*.yaml`
+exemption lists: it may shrink, it may not grow by accident.
+
+**3. Which metric moved.**
+
+Lines, branches and functions are reported and gated separately. On
+`dvystrcil/n8n-workflow` line coverage read **99.90%** while branch coverage
+read **86.81%** — and every bug worth finding lived in that gap.
+
+## What it deliberately does NOT do
+
+**Mutation testing.** This matters enough to state plainly, because a green
+coverage gate invites exactly the wrong conclusion.
+
+Measured on `dvystrcil/n8n-workflow`, 2026-09-12, at 99.90% line coverage:
+
+| | |
+|---|---|
+| mutants generated | 70 |
+| killed | 65 |
+| **survived** | **5** |
+
+Every one of those five lines was covered. The survivors:
+
+- a null-guard whose `&&` could become `||`, so a provenance label stopped
+  gating anything and an alert would comment on an unrelated issue
+- two staleness comparisons whose `>` and `<` could shift to `>=` and `<=`
+  with nothing sitting on either boundary
+- a malformed-input guard nothing exercised, sitting under a comment
+  explaining why it must not be removed
+- a `return false` that could become `return true` and would have fired an
+  alert rule on **every paused workflow in the fleet**
+
+Coverage cannot see any of that. It answers "did this line run", not "would
+anything have noticed if it were wrong".
+
+Mutation testing is the tool that answers the second question, and it is not
+in this action because its cost is repo-shaped: 70 mutants against a 0.4s
+suite took ~40 seconds, which is cheap; the same sweep against a repo with a
+minutes-long suite is not. A mutation gate wants a designated file list rather
+than a whole tree, which is a different input and a different action.
+
+**Treat a passing coverage gate as evidence the harness ran, not as evidence
+the code is correct.**
+
+## Exit codes
+
+| code | meaning |
+|---|---|
+| 0 | at or above every floor |
+| 1 | below a floor — coverage regressed |
+| 2 | could not measure — no tests ran, or no/invalid baseline |
+
+2 is not a coverage verdict. It means the question was never asked. A missing
+baseline lands here too: absent floors would otherwise default to zero and the
+gate would pass on any coverage at all.
+
+## Inputs
+
+| input | default | notes |
+|---|---|---|
+| `runtime` | *required* | `node` or `python` |
+| `test_command` | per-runtime default | must emit native coverage output |
+| `baseline` | `.coverage-baseline.json` | committed floors |
+| `working_directory` | `.` | |
+
+Defaults are the dependency-free invocations:
+
+- **node** — `node --experimental-test-coverage --test tests/*.js`. Native
+  since Node 22; no package needed.
+- **python** — `python3 -m coverage run -m unittest discover -s tests -p "test*.py"`.
+  Python ships `trace` and `sys.monitoring` but no coverage report with
+  thresholds, so `coverage.py` is a real dependency here.
+
+## A parsing note
+
+A metric the parser cannot find is reported **absent**, never `0`. Reporting
+zero would turn "I could not read the report" into "your coverage is 0%",
+which reads as a coverage failure and sends someone to write tests for a
+problem that does not exist. `functions=-` on Python runs is this: coverage.py
+has no function-level percentage.
