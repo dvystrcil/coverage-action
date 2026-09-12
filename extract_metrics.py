@@ -38,6 +38,14 @@ NODE_ALLFILES_RE = re.compile(
     re.M | re.I)
 # unittest: `Ran 14 tests in 0.006s`
 PY_TESTS_RE = re.compile(r'^Ran\s+(\d+)\s+tests?\s+in\b', re.M)
+# pytest summary: `105 passed in 0.72s`, `3 failed, 102 passed in 0.9s`,
+# `1 failed, 2 passed, 1 skipped in 0.1s`. Counted as the SUM of outcomes,
+# because the denominator this gate cares about is "how many tests ran", not
+# "how many passed" -- a suite where everything failed still ran.
+PYTEST_OUTCOME_RE = re.compile(
+    r'(\d+)\s+(passed|failed|xfailed|xpassed|error|errors|skipped)\b')
+PYTEST_SUMMARY_LINE_RE = re.compile(r'^=*\s*[\d]+\s+\w+.*\bin\s[\d.]+s',
+                                    re.M)
 
 
 def parse_node(output: str) -> dict:
@@ -51,10 +59,33 @@ def parse_node(output: str) -> dict:
     }
 
 
+def _pytest_count(output: str) -> int | None:
+    """Sum the outcomes on pytest's summary line, if there is one.
+
+    Scoped to the summary line rather than the whole output, so a test NAMED
+    `test_5_passed_records` cannot be scraped as a count, and so a progress
+    line like `72%` is never mistaken for one.
+    """
+    total = 0
+    found = False
+    for line in PYTEST_SUMMARY_LINE_RE.findall(output):
+        for count, _outcome in PYTEST_OUTCOME_RE.findall(line):
+            total += int(count)
+            found = True
+    return total if found else None
+
+
 def parse_python(test_output: str, coverage_json: str | None) -> dict:
     # Several suites may run in one job; unittest prints one `Ran N` per
     # suite, so the count is their sum, not the last one seen.
     tests = sum(int(m) for m in PY_TESTS_RE.findall(test_output)) or None
+    if tests is None:
+        # pytest is the other runner in this account's repos, and it reports
+        # nothing resembling `Ran N tests`. Without this, a pytest suite of
+        # any size parses as zero and the gate reports "NO TESTS RAN" --
+        # turning a healthy repo into a hard failure and, worse, teaching
+        # whoever sees it that the message means nothing.
+        tests = _pytest_count(test_output)
     lines = branches = None
     if coverage_json:
         try:
