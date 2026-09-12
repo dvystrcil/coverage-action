@@ -9,6 +9,27 @@ three things a single percentage cannot separate.
     runtime: node          # or: python
 ```
 
+## Setup note: this repo is private
+
+Every other `*-action` repo in this account is public, so nothing needed
+saying. This one is private, and a private action is **not resolvable from
+another repo** by default — the consumer's run fails with:
+
+```
+Unable to resolve action `dvystrcil/coverage-action`, repository not found
+```
+
+which reads like a typo and is not one. Grant access once, on THIS repo:
+
+```bash
+gh api -X PUT repos/dvystrcil/coverage-action/actions/permissions/access \
+  -f access_level=user
+```
+
+(Settings → Actions → General → Access, "Accessible from repositories owned
+by dvystrcil".) Verified against dvystrcil/n8n-workflow#220: the job failed
+with the message above, and passed unchanged once the setting was applied.
+
 ## What it checks, and why it is three things
 
 **1. That the tests actually executed.**
