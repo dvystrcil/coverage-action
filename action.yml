@@ -33,13 +33,23 @@ runs:
       id: run
       shell: bash
       working-directory: ${{ inputs.working_directory }}
+      # Inputs arrive through `env:`, never interpolated into the script
+      # body. `CMD='${{ inputs.test_command }}'` broke on the first caller
+      # whose command contained a single quote -- dvystrcil/homelab's
+      # `sed 's|/|.|g'` terminated the string and the shell ran fragments
+      # (`/: Is a directory`, `g: command not found`). The same splice is an
+      # injection vector: a command containing `'; curl ... #` would execute.
+      # An env var is passed as data and neither problem exists.
+      env:
+        INPUT_TEST_COMMAND: ${{ inputs.test_command }}
+        INPUT_RUNTIME: ${{ inputs.runtime }}
       run: |
         set -uo pipefail   # deliberately NOT -e: a failing suite must still
                            # reach the gate, so the summary says whether the
                            # tests failed or were never collected.
-        CMD='${{ inputs.test_command }}'
+        CMD="$INPUT_TEST_COMMAND"
         if [ -z "$CMD" ]; then
-          case '${{ inputs.runtime }}' in
+          case "$INPUT_RUNTIME" in
             node)   CMD='node --experimental-test-coverage --test tests/*.js' ;;
             python) CMD='python3 -m coverage run -m unittest discover -s tests -p "test*.py"' ;;
           esac
@@ -66,28 +76,33 @@ runs:
     - name: Gate
       shell: bash
       working-directory: ${{ inputs.working_directory }}
+      # Same reasoning as the run step: inputs as data, not as script text.
+      env:
+        INPUT_RUNTIME: ${{ inputs.runtime }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        ACTION_DIR: ${{ github.action_path }}
+        SUITE_RC: ${{ steps.run.outputs.suite_rc }}
       run: |
         set -euo pipefail
-        ACTION_DIR='${{ github.action_path }}'
         EXTRA=""
-        if [ '${{ inputs.runtime }}' = 'python' ] && [ -f /tmp/coverage.json ]; then
+        if [ "$INPUT_RUNTIME" = 'python' ] && [ -f /tmp/coverage.json ]; then
           EXTRA="--coverage-json /tmp/coverage.json"
         fi
         ARGS=$(python3 "$ACTION_DIR/extract_metrics.py" \
-                 --runtime '${{ inputs.runtime }}' \
+                 --runtime "$INPUT_RUNTIME" \
                  --test-output /tmp/test-output.txt $EXTRA)
         echo "measured: $ARGS"
 
         set +e
-        python3 "$ACTION_DIR/coverage_gate.py" --baseline '${{ inputs.baseline }}' $ARGS
+        python3 "$ACTION_DIR/coverage_gate.py" --baseline "$INPUT_BASELINE" $ARGS
         gate_rc=$?
         set -e
 
         # A suite that FAILED and a suite that never ran are different
         # findings, and neither is "coverage regressed". Report both rather
         # than letting the gate's exit code stand in for all three.
-        if [ '${{ steps.run.outputs.suite_rc }}' != '0' ] && [ "$gate_rc" -eq 0 ]; then
-          echo "::error::the test suite exited ${{ steps.run.outputs.suite_rc }} — coverage is at or above its floor, but the tests did not pass"
+        if [ "$SUITE_RC" != '0' ] && [ "$gate_rc" -eq 0 ]; then
+          echo "::error::the test suite exited $SUITE_RC — coverage is at or above its floor, but the tests did not pass"
           exit 1
         fi
         exit $gate_rc

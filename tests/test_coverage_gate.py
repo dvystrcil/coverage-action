@@ -162,5 +162,52 @@ class TestMarker(unittest.TestCase):
         self.assertIn("branches=-", out)
 
 
+
+class TestActionDefinition(unittest.TestCase):
+    """action.yml must not splice inputs into shell script bodies.
+
+    `CMD='${{ inputs.test_command }}'` broke on the first caller whose command
+    contained a single quote -- dvystrcil/homelab passed `sed 's|/|.|g'`, the
+    quote terminated the string, and the shell ran the fragments (`/: Is a
+    directory`, `g: command not found`).
+
+    The same splice is an injection vector: a command containing `'; curl ... #`
+    would execute. Inputs belong in `env:`, where they are data.
+    """
+
+    ACTION = Path(__file__).resolve().parent.parent / "action.yml"
+
+    def test_no_input_interpolation_inside_run_blocks(self):
+        import re
+        text = self.ACTION.read_text(encoding="utf-8")
+        offenders = []
+        in_run = False
+        run_indent = 0
+        for line in text.splitlines():
+            stripped = line.strip()
+            if re.match(r'^run:\s*\|', stripped):
+                in_run, run_indent = True, len(line) - len(line.lstrip())
+                continue
+            if in_run:
+                if stripped and (len(line) - len(line.lstrip())) <= run_indent:
+                    in_run = False
+                elif "${{ inputs." in line or "${{ steps." in line:
+                    # A comment quoting the old bug is not the bug.
+                    if not stripped.startswith("#"):
+                        offenders.append(stripped[:70])
+        self.assertEqual(offenders, [],
+                         "inputs must reach the shell through env:, not by "
+                         "textual interpolation into the script")
+
+    def test_inputs_are_exposed_as_env(self):
+        # Guard against the fix being undone by deleting the env block and
+        # "simplifying" back to interpolation.
+        text = self.ACTION.read_text(encoding="utf-8")
+        self.assertIn("INPUT_TEST_COMMAND:", text)
+        self.assertIn("INPUT_RUNTIME:", text)
+        self.assertIn("INPUT_BASELINE:", text)
+
+
+
 if __name__ == "__main__":
     unittest.main()
