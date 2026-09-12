@@ -110,6 +110,38 @@ class TestPython(unittest.TestCase):
         self.assertEqual(m["tests"], 2)
         self.assertIsNone(m["lines"])
 
+    def test_reads_a_pytest_summary(self):
+        # pytest reports nothing resembling `Ran N tests`. Without this a
+        # pytest suite of any size parsed as zero and the gate reported
+        # "NO TESTS RAN" -- turning a healthy repo into a hard failure and
+        # teaching whoever saw it that the message means nothing. Found on
+        # the first pytest consumer (dvystrcil/helm-update-ai, 105 tests).
+        m = em.parse_python("105 passed in 0.72s\n", None)
+        self.assertEqual(m["tests"], 105)
+
+    def test_pytest_count_is_every_outcome_not_just_passes(self):
+        # The denominator is "how many tests ran". A suite where everything
+        # failed still ran, and must not report as zero -- that would collapse
+        # "all red" into "never executed", the one distinction this gate
+        # exists to preserve.
+        m = em.parse_python("3 failed, 102 passed in 0.9s\n", None)
+        self.assertEqual(m["tests"], 105)
+
+    def test_pytest_skips_and_xfails_are_counted_as_run(self):
+        m = em.parse_python("1 failed, 2 passed, 1 skipped in 0.1s\n", None)
+        self.assertEqual(m["tests"], 4)
+
+    def test_a_test_named_like_a_pytest_summary_is_not_counted(self):
+        # Scoped to the summary line, so a test name cannot be scraped.
+        out = "tests/t.py::test_5_passed_records PASSED\n7 passed in 0.2s\n"
+        self.assertEqual(em.parse_python(out, None)["tests"], 7)
+
+    def test_unittest_wins_when_both_shapes_appear(self):
+        # coverage.py's own output can carry stray words; unittest's `Ran N`
+        # is the more specific signal, so it is checked first.
+        out = "Ran 9 tests in 0.1s\nOK\n"
+        self.assertEqual(em.parse_python(out, None)["tests"], 9)
+
     def test_no_tests_line_reports_none(self):
         # The harness printed nothing recognisable. That is not "0 tests
         # passed" -- the gate must be able to tell those apart.
